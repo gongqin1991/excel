@@ -7,56 +7,95 @@ import (
 	"strings"
 )
 
+const (
+	INVALID = iota - 1
+	HEAD
+	ROW
+)
+
 var (
-	colAlias = []string{"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K",
+	CA = []string{"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K",
 		"L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"}
 )
 
 type writer struct {
-	dirty    bool
-	filename string
-	sheet    string
-	w        *excelize.File
-	err      error
-
-	sheetIdx int //工作表索引
+	w          *excelize.File
+	dirty      bool
+	filename   string
+	sheetName  string
+	sheetIndex int
+	hierarchy  int
+	err        error
 }
 
 func NewWriter(path, sheet string) *writer {
 	fs := excelize.NewFile()
-	var err error
-	if oldName := fs.GetSheetName(0); oldName != sheet {
+	var (
+		err    error
+		offset int
+	)
+	if oldName := fs.GetSheetName(offset); sheet != "" && oldName != sheet {
 		err = fs.SetSheetName(oldName, sheet)
+	} else if sheet == "" {
+		offset = INVALID
 	}
 	wr := &writer{
-		filename: path,
-		w:        fs,
-		sheet:    sheet,
-		err:      err,
+		filename:   path,
+		w:          fs,
+		sheetIndex: offset,
+		sheetName:  sheet,
+		err:        err,
 	}
 	return wr
+}
+
+func NewWriter2(path string) *writer {
+	return NewWriter(path, "")
+}
+
+func checkSheetName(name string) {
+	if name == "" || strings.TrimSpace(name) == "" {
+		panic("invalid sheet name")
+	}
 }
 
 func OpenWriter(w *writer, sheet string) *writer {
 	fs := w.w
 	var (
-		err        error
-		sheetIndex int
+		err    error
+		offset int
 	)
-	sheetIndex, err = fs.GetSheetIndex(sheet)
-	if err == nil && sheetIndex == -1 {
-		sheetIndex, err = fs.NewSheet(sheet)
+	checkSheetName(sheet)
+	if w.hierarchy == 0 && w.sheetIndex == INVALID {
+		offset = HEAD
+		if oldName := fs.GetSheetName(offset); oldName != sheet {
+			err = fs.SetSheetName(oldName, sheet)
+		}
+
+		w.err = err
+		w.sheetIndex = offset
+		w.sheetName = sheet
+		return w
 	}
+
+	offset, err = fs.GetSheetIndex(sheet)
+	if err == nil && offset == INVALID {
+		offset, err = fs.NewSheet(sheet)
+	}
+
 	wr := &writer{
-		filename: w.filename,
-		w:        fs,
-		sheet:    sheet,
-		err:      err,
-		sheetIdx: sheetIndex,
+		filename:   w.filename,
+		dirty:      w.dirty,
+		w:          fs,
+		sheetIndex: offset,
+		sheetName:  sheet,
+		hierarchy:  w.hierarchy + 1,
+		err:        err,
 	}
 	return wr
 }
 
+// Deprecated:被 WriteRow 替换
 func (w *writer) WriteColumns(columns []string, rows int) {
 	checkRow(w, rows)
 	for i, n := 0, len(columns); i < n && w.err == nil; i++ {
@@ -64,8 +103,12 @@ func (w *writer) WriteColumns(columns []string, rows int) {
 			w.dirty = true
 		}
 		cell := fmt.Sprintf("%s%d", w.indexToCol(i), rows)
-		w.err = w.w.SetCellStr(w.sheet, cell, columns[i])
+		w.err = w.w.SetCellStr(w.sheetName, cell, columns[i])
 	}
+}
+
+func (w *writer) WriteRow(columns []string, rows int) {
+	w.WriteColumns(columns, rows)
 }
 
 func checkRow(w *writer, row int) {
@@ -86,7 +129,7 @@ func checkCol(w *writer, col int) {
 }
 
 func (w *writer) WriteHeader(columns []string) {
-	w.WriteColumns(columns, 1)
+	w.WriteColumns(columns, ROW)
 }
 
 func (w *writer) MergeRows(cols, start, size int) {
@@ -95,18 +138,18 @@ func (w *writer) MergeRows(cols, start, size int) {
 	if w.err != nil {
 		return
 	}
-	colstr := w.indexToCol(cols - 1)
-	s := fmt.Sprintf("%s%d", colstr, start)
-	t := fmt.Sprintf("%s%d", colstr, start+size-1)
-	w.err = w.w.MergeCell(w.sheet, s, t)
+	colStr := w.indexToCol(cols - 1)
+	s := fmt.Sprintf("%s%d", colStr, start)
+	t := fmt.Sprintf("%s%d", colStr, start+size-1)
+	w.err = w.w.MergeCell(w.sheetName, s, t)
 }
 
 func (w *writer) indexToCol(cols int) string {
 	C := cols
 	cba := make([]string, 0)
-	for N := len(colAlias); C >= 0; {
+	for N := len(CA); C >= 0; {
 		a := C % N
-		cba = append(cba, colAlias[a])
+		cba = append(cba, CA[a])
 		C = C/N - 1
 	}
 	for i, j := 0, len(cba)-1; i < j; {
@@ -118,10 +161,16 @@ func (w *writer) indexToCol(cols int) string {
 }
 
 func (w *writer) SaveTo() {
-	if w.err != nil || !w.dirty {
+	err := w.err
+	if err != nil || !w.dirty {
 		return
 	}
-	w.err = w.w.SaveAs(w.filename)
+	wr := w.w
+	err = wr.SaveAs(w.filename)
+	if err == nil {
+		err = wr.Close()
+	}
+	w.err = err
 }
 
 func (w *writer) Err() error {
